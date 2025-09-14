@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document>
+  <secmain id="1" volumn="1">
+    <title>Administrative Relief.</title>
+    <para>I am going to madurai</para>
+    <para>The festival is celebrated in Chennai</para>
+    <para>Law and order is important for society</para>
+    <footnote id="fn1" ref="123">See case law reference</footnote>
+  </secmain>
+
+  <secsub id="2">
+    <title>Travel Section</title>
+    <p>People often travel from Delhi to Mumbai</p>
+    <p>Food culture is rrrrppppp and diverse</p>
+    <p>Sports events bring joy</p>
+	<footnote id="fn1" ref="999">See case law referennnce</footnote>
+  </secsub>
+
+  <secsub id="3">
+    <title>Education Section</title>
+    <p>Schools are reopening after holidays</p>
+    <p>Students participate in science fair</p>
+	<footnote id="fn1" ref="999">See case law referennnce</footnote>
+  </secsub>
+
+  <secsub id="4">
+    <title>Technology Section</title>
+    <article>Artificial Intelligence is evolving rapidly</article>
+    <article>Blockchain is used in financial applications</article>
+	<footnote id="fn1" ref="999">See case law referennnce</footnote>
+  </secsub>
+
+  <secsub id="5">
+    <title>Health Section</title>
+    <note>Doctors recommend regular exercise</note>
+    <note>Vaccination is important for children</note>
+	<footnote id="fn1" ref="999">See case law referennnce</footnote>
+  </secsub>
+
+  <appendix id="6">
+    <ref>Reference 1: Case A vs Case B</ref>
+    <ref>Reference 2: Study on Environment</ref>
+	<footnote id="fn1" ref="999">See case law referennnce</footnote>
+  </appendix>
+</document>

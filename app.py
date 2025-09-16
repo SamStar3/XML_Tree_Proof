@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, jsonify, send_file
+from lxml import etree as LET
 from xml_engine.diff import parse_tree, compute_issues
 from xml_engine.utils import render_full_tree_with_injected, token_diff_html, escape_xml
 from xml_engine.hardindex import (
@@ -148,19 +149,18 @@ def navigate():
 def accept():
     d = request.get_json()
 
-    # Ensure span indexes exist
-    if STATE["left_text_spans"] is None or STATE["right_text_spans"] is None:
-        STATE["left_text_spans"]  = index_element_text_spans(STATE["raw_left"])
-        STATE["right_text_spans"] = index_element_text_spans(STATE["raw_right"])
-    if STATE["left_attr_spans"] is None or STATE["right_attr_spans"] is None:
-        STATE["left_attr_spans"]  = index_attribute_value_spans(STATE["raw_left"])
-        STATE["right_attr_spans"] = index_attribute_value_spans(STATE["raw_right"])
+    # Always rebuild span indexes to avoid stale caches after prior edits
+    STATE["left_text_spans"]  = index_element_text_spans(STATE["raw_left"])
+    STATE["right_text_spans"] = index_element_text_spans(STATE["raw_right"])
+    STATE["left_attr_spans"]  = index_attribute_value_spans(STATE["raw_left"])
+    STATE["right_attr_spans"] = index_attribute_value_spans(STATE["raw_right"])
 
     kind      = d.get("kind", "text")
     direction = d.get("direction", "left_to_right")   # "left_to_right" or "right_to_left"
     stepsL    = de_steps(d["steps"])                  # LEFT anchor
     stepsR    = de_steps(d.get("steps_right", d["steps"]))  # RIGHT anchor (fallback)
-    attr      = (d.get("attr") or "").split(":")[-1] if kind == "attr" else None
+    # For footnote UI, we send kind="attr" from the client but keep attr name always
+    attr      = (d.get("attr") or "").split(":")[-1] if kind in ("attr", "footnote") else None
 
     keyL = build_path_key(stepsL)
     keyR = build_path_key(stepsR)
@@ -170,7 +170,96 @@ def accept():
         l_span = STATE["left_attr_spans"].get(f"{keyL}@{attr}")
         r_span = STATE["right_attr_spans"].get(f"{keyR}@{attr}")
         if not l_span or not r_span:
-            return jsonify({"ok": False, "error": "attr span missing"}), 400
+            # Retry with fresh re-index once more to be safe
+            STATE["left_attr_spans"]  = index_attribute_value_spans(STATE["raw_left"])
+            STATE["right_attr_spans"] = index_attribute_value_spans(STATE["raw_right"])
+            l_span = STATE["left_attr_spans"].get(f"{keyL}@{attr}")
+            r_span = STATE["right_attr_spans"].get(f"{keyR}@{attr}")
+        if not l_span or not r_span:
+            # Fallback: mutate trees directly using steps and reserialize
+            def _find_by_steps(root_elem, steps):
+                cur = root_elem
+                for ln, idx in steps[1:]:  # skip root itself
+                    count = 0
+                    target = None
+                    for child in cur:
+                        if not isinstance(child.tag, str):
+                            continue
+                        name = child.tag
+                        if "}" in name: name = name.split("}", 1)[1]
+                        if ":" in name: name = name.split(":", 1)[1]
+                        if name == ln:
+                            count += 1
+                            if count == idx:
+                                target = child
+                                break
+                    if target is None:
+                        return None
+                    cur = target
+                return cur
+
+            src_tree  = STATE["right_tree"] if direction == "right_to_left" else STATE["left_tree"]
+            dest_tree = STATE["left_tree"]  if direction == "right_to_left" else STATE["right_tree"]
+            src_elem  = _find_by_steps(src_tree.getroot(), stepsR if direction == "right_to_left" else stepsL)
+            dst_elem  = _find_by_steps(dest_tree.getroot(), stepsL if direction == "right_to_left" else stepsR)
+            if src_elem is None or dst_elem is None:
+                return jsonify({
+                    "ok": False,
+                    "error": "attr span missing and fallback locate failed",
+                    "left_key": f"{keyL}@{attr}",
+                    "right_key": f"{keyR}@{attr}"
+                }), 400
+            # Copy attribute value (local name match)
+            src_attrs = {k.split(":")[-1]: v for k, v in src_elem.attrib.items()}
+            if attr not in src_attrs:
+                # nothing to copy
+                return jsonify({"ok": False, "error": "source attr missing"}), 400
+            dst_attrs = dict(dst_elem.attrib)
+            # Preserve original attribute key name if present, else use attr
+            dst_key = None
+            for k in dst_elem.attrib.keys():
+                if k.split(":")[-1] == attr:
+                    dst_key = k; break
+            if dst_key is None:
+                dst_key = attr
+            dst_elem.attrib[dst_key] = src_attrs[attr]
+            # Reserialize the mutated destination side back to raw strings
+            if direction == "right_to_left":
+                STATE["raw_left"] = LET.tostring(dest_tree, encoding="unicode")
+                STATE["left_tree"] = parse_tree(STATE["raw_left"])
+            else:
+                STATE["raw_right"] = LET.tostring(dest_tree, encoding="unicode")
+                STATE["right_tree"] = parse_tree(STATE["raw_right"])
+            # invalidate spans
+            STATE["left_text_spans"] = STATE["right_text_spans"] = None
+            STATE["left_attr_spans"] = STATE["right_attr_spans"] = None
+            # record and persist below
+            entry = {
+                "kind": kind,
+                "steps": stepsL,
+                "steps_right": stepsR,
+                "direction": direction,
+                "already_applied": True,
+                "attr": attr
+            }
+            STATE["accepted"].append(entry)
+            # recompute issues after fallback apply
+            try:
+                STATE["issues"] = compute_issues(STATE["left_tree"], STATE["right_tree"], only=None)
+                STATE["idx"] = min(STATE["idx"], max(0, len(STATE["issues"]) - 1))
+            except Exception:
+                traceback.print_exc()
+            # persist files
+            try:
+                outL = os.path.join("output", "final_left.xml")
+                outR = os.path.join("output", "final_right.xml")
+                with open(outL, "wb") as f:
+                    f.write((STATE["raw_left"] or "").encode("utf-8", errors="replace"))
+                with open(outR, "wb") as f:
+                    f.write((STATE["raw_right"] or "").encode("utf-8", errors="replace"))
+            except Exception:
+                traceback.print_exc()
+            return jsonify({"ok": True, "remaining": len(STATE["issues"])})
         (ls, le), (rs, re) = l_span, r_span
         src = STATE["raw_left"][ls:le] if direction == "left_to_right" else STATE["raw_right"][rs:re]
         # apply to dest side (in-memory)
@@ -216,15 +305,23 @@ def accept():
         entry["attr"] = attr
     STATE["accepted"].append(entry)
 
-    # Remove the matching issue so count decreases and nav works
-    ridx = None
-    for i, it in enumerate(STATE["issues"]):
-        if it["kind"] == kind and it.get("attr") == (attr if kind == "attr" else it.get("attr")) and it["steps"] == stepsL:
-            ridx = i
-            break
-    if ridx is not None:
-        STATE["issues"].pop(ridx)
+    # Recompute issues from current trees so UI reflects real-time state
+    try:
+        STATE["issues"] = compute_issues(STATE["left_tree"], STATE["right_tree"], only=None)
         STATE["idx"] = min(STATE["idx"], max(0, len(STATE["issues"]) - 1))
+    except Exception:
+        traceback.print_exc()
+
+    # ---- persist current buffers immediately so downloads reflect real-time state ----
+    try:
+        outL = os.path.join("output", "final_left.xml")
+        outR = os.path.join("output", "final_right.xml")
+        with open(outL, "wb") as f:
+            f.write((STATE["raw_left"] or "").encode("utf-8", errors="replace"))
+        with open(outR, "wb") as f:
+            f.write((STATE["raw_right"] or "").encode("utf-8", errors="replace"))
+    except Exception:
+        traceback.print_exc()
 
     return jsonify({"ok": True, "remaining": len(STATE["issues"])})
 
@@ -318,6 +415,21 @@ def download_left():
 @app.route("/download/right")
 def download_right():
     return send_file(os.path.join("output", "final_right.xml"), as_attachment=True)
+
+
+@app.route("/recompute", methods=["POST"])
+def recompute():
+    """Recompute issues from the current in-memory trees so UI reflects latest state."""
+    try:
+        if STATE["left_tree"] is None or STATE["right_tree"] is None:
+            return jsonify({"error": "no trees"}), 400
+        STATE["issues"] = compute_issues(STATE["left_tree"], STATE["right_tree"], only=None)
+        STATE["idx"] = min(STATE["idx"], max(0, len(STATE["issues"]) - 1))
+        kinds = Counter([i["kind"] for i in STATE["issues"]])
+        return jsonify({"count": len(STATE["issues"]), "byKind": dict(kinds)})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(debug=True)

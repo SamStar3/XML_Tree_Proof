@@ -3,8 +3,9 @@ let currentSteps = null;
 let currentStepsRight = null;
 let currentKind  = "text";
 let currentAttr  = null;
-let currentDirection = "left_to_right"; 
+let currentDirection = "right_to_left"; 
 let currentIssueKind = "gibberish";
+let hasDiff = false;
 
 let programmaticScroll = false;
 function withProgrammaticScroll(fn, unlockDelay = 160) {
@@ -78,7 +79,7 @@ async function loadCurrent() {
     currentKind  = "text";
     currentAttr  = null;
     currentIssueKind = "gibberish";
-    currentDirection = "left_to_right";
+    currentDirection = "right_to_left";
     return;
   }
 
@@ -94,14 +95,11 @@ async function loadCurrent() {
   currentIssueKind   = data.issue_kind || "gibberish";      // real kind: "duplicate" | "gibberish" | "footnote"
   currentAttr        = data.attr || null;
 
-  // decide direction from server hint
-  if (data.dup_side === "right") {
-    currentDirection = "left_to_right";   // copy left → right
-  } else if (data.dup_side === "left") {
-    currentDirection = "right_to_left";   // copy right → left
-  } else {
-    currentDirection = "left_to_right";
-  }
+  // Always treat RIGHT as the correct source → copy right → left
+  currentDirection = "right_to_left";
+
+  // Update button label to make direction explicit
+  try { document.getElementById("acceptBtn").textContent = "Accept (Right → Left)"; } catch {}
 
   // focus
   jumpToAnchor(leftPane);
@@ -124,7 +122,12 @@ async function runDiff(kind) {
   }
   const formEl = document.getElementById("uploadForm");
   const form = new FormData(formEl);
-  if (kind && kind !== "all") form.append("only", kind);
+  // Respect selected kind on first compare
+  if (kind && kind !== "all") {
+    form.append("only", kind);
+  } else {
+    form.append("only", "all");
+  }
 
   const res = await fetch("/diff", { method: "POST", body: form });
   if (!res.ok) {
@@ -134,6 +137,7 @@ async function runDiff(kind) {
   }
   const info = await res.json();
   if (info) console.log("DIFF →", info);
+  hasDiff = true;
 
   const pretty = (k) =>
     k === "footnote" ? "footnote attrs" :
@@ -149,7 +153,7 @@ async function runDiff(kind) {
     return;
   }
 
-  document.getElementById("issueType").value = kind || "all";
+  if (kind) document.getElementById("issueType").value = kind;
   await loadCurrent();
 }
 
@@ -163,7 +167,12 @@ document.getElementById("issueType").addEventListener("change", async (e) => {
     currentSteps = null; currentStepsRight = null; currentKind = "text"; currentAttr = null;
     return;
   }
-  await runDiff(v);
+  // If we haven't compared yet, run initial diff once. Otherwise just re-render with new filter.
+  if (!hasDiff) {
+    await runDiff(v);
+  } else {
+    await loadCurrent();
+  }
 });
 
 // ======= Navigation & actions =======
@@ -180,18 +189,21 @@ document.getElementById("prevBtn").onclick = async () => {
 // Accept click
 document.getElementById("acceptBtn").onclick = async () => {
   if (!currentSteps) return;
+  const sendKind = (currentIssueKind === "footnote") ? "attr" : currentIssueKind;
   await fetch("/accept", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       steps: currentSteps,
       steps_right: currentStepsRight,
-      kind: currentIssueKind,          // 👈 use REAL issue kind
+      kind: sendKind,
       attr: currentAttr,
       direction: currentDirection
     })
   });
-  await loadCurrent(); // count/pos will drop now
+  // Always recompute issues to reflect any structural changes and refresh panes
+  try { await fetch("/recompute", { method: "POST" }); } catch {}
+  await loadCurrent();
 };
 
 document.getElementById("rejectBtn").onclick = async () => {
@@ -225,6 +237,10 @@ document.getElementById("applyBtn").onclick = async () => {
 
   if (data.download_left)  window.open(data.download_left,  "_blank");
   if (data.download_right) window.open(data.download_right, "_blank");
+
+  // Recompute after apply as well
+  try { await fetch("/recompute", { method: "POST" }); } catch {}
+  await loadCurrent();
 };
 // ======= Splitter =======
 (function splitterInit(){
@@ -286,6 +302,8 @@ document.getElementById("applyBtn").onclick = async () => {
     reader.onload = () => {
       paneEl.textContent = reader.result || "";
       document.getElementById("pos").textContent = "—/—";
+      // New files selected invalidate prior diff state
+      hasDiff = false;
     };
     reader.readAsText(file);
   }

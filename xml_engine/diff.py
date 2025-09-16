@@ -121,7 +121,14 @@ def compute_footnote_issues(left_tree, right_tree):
         for k in (set(l_attrs) | set(r_attrs)):
             lv, rv = l_attrs.get(k, ""), r_attrs.get(k, "")
             if lv != rv:
-                out.append({"kind": "footnote", "steps": build_path(l_elem), "attr": k, "old": lv, "new": rv})
+                out.append({
+                    "kind": "footnote",
+                    "steps": build_path(l_elem),
+                    "steps_right": build_path(r_elem),
+                    "attr": k,
+                    "old": lv,
+                    "new": rv
+                })
     
     return out
 

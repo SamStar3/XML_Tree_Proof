@@ -171,6 +171,8 @@ document.getElementById("issueType").addEventListener("change", async (e) => {
   if (!hasDiff) {
     await runDiff(v);
   } else {
+    // Ask server to recompute issues for this specific kind using current trees
+    await fetch("/set_filter", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ only: v }) });
     await loadCurrent();
   }
 });
@@ -208,7 +210,8 @@ document.getElementById("acceptBtn").onclick = async () => {
 
 document.getElementById("rejectBtn").onclick = async () => {
   await fetch("/reject", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
-  await fetch("/navigate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dir: "next" }) });
+  // After reject, wrap to next item (1 after last becomes 1)
+  await fetch("/navigate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dir: "next_wrap" }) });
   await loadCurrent();
 };
 

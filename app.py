@@ -139,10 +139,18 @@ def render_current():
 @app.route("/navigate", methods=["POST"])
 def navigate():
     d = request.get_json()
-    if d.get("dir") == "next":
-        STATE["idx"] = min(STATE["idx"] + 1, len(STATE["issues"]) - 1)
-    elif d.get("dir") == "prev":
+    direction = d.get("dir")
+    if direction == "next":
+        STATE["idx"] = min(STATE["idx"] + 1, max(0, len(STATE["issues"]) - 1))
+    elif direction == "prev":
         STATE["idx"] = max(STATE["idx"] - 1, 0)
+    elif direction == "reset":
+        STATE["idx"] = 0
+    elif direction == "next_wrap":
+        if len(STATE["issues"]) == 0:
+            STATE["idx"] = 0
+        else:
+            STATE["idx"] = (STATE["idx"] + 1) % len(STATE["issues"]) 
     return jsonify({"ok": True})
 
 @app.route("/accept", methods=["POST"])
@@ -425,6 +433,27 @@ def recompute():
             return jsonify({"error": "no trees"}), 400
         STATE["issues"] = compute_issues(STATE["left_tree"], STATE["right_tree"], only=None)
         STATE["idx"] = min(STATE["idx"], max(0, len(STATE["issues"]) - 1))
+        kinds = Counter([i["kind"] for i in STATE["issues"]])
+        return jsonify({"count": len(STATE["issues"]), "byKind": dict(kinds)})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/set_filter", methods=["POST"])
+def set_filter():
+    """Recompute issues for a specific kind from current trees, no re-upload required."""
+    try:
+        if STATE["left_tree"] is None or STATE["right_tree"] is None:
+            return jsonify({"error": "no trees"}), 400
+        d = request.get_json() or {}
+        only_kind = d.get("only")
+        if only_kind == "all":
+            only_kind = None
+        if only_kind not in {"gibberish", "duplicate", "footnote", None}:
+            only_kind = None
+        STATE["issues"] = compute_issues(STATE["left_tree"], STATE["right_tree"], only=only_kind)
+        STATE["idx"] = 0
         kinds = Counter([i["kind"] for i in STATE["issues"]])
         return jsonify({"count": len(STATE["issues"]), "byKind": dict(kinds)})
     except Exception as e:

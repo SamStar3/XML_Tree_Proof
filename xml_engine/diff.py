@@ -100,9 +100,7 @@ def compute_gibberish_issues(left_tree, right_tree):
         lt = l_elem.text or ""
         rt = r_elem.text or ""
         if looks_gibberish(lt) and lt != rt:
-            print({"kind": "gibberish", "steps": build_path(l_elem), "old": lt, "new": rt})
             out.append({"kind": "gibberish", "steps": build_path(l_elem), "old": lt, "new": rt})
-            print(out)
     return out
 
 

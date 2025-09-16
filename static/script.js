@@ -5,6 +5,8 @@ let currentKind  = "text";
 let currentAttr  = null;
 let currentDirection = "left_to_right"; 
 let currentIssueKind = "gibberish";
+let allCleared = false; // set true after Apply confirms no remaining issues
+let clearedKinds = new Set(); // track individually cleared kinds
 
 let programmaticScroll = false;
 function withProgrammaticScroll(fn, unlockDelay = 160) {
@@ -94,14 +96,8 @@ async function loadCurrent() {
   currentIssueKind   = data.issue_kind || "gibberish";      // real kind: "duplicate" | "gibberish" | "footnote"
   currentAttr        = data.attr || null;
 
-  // decide direction from server hint
-  if (data.dup_side === "right") {
-    currentDirection = "left_to_right";   // copy left → right
-  } else if (data.dup_side === "left") {
-    currentDirection = "right_to_left";   // copy right → left
-  } else {
-    currentDirection = "left_to_right";
-  }
+  // Always copy RIGHT → LEFT for this acceptance
+  currentDirection = "right_to_left";
 
   // focus
   jumpToAnchor(leftPane);
@@ -109,6 +105,11 @@ async function loadCurrent() {
 }
 
 // ======= Helpers =======
+function prettyKind(k) {
+  return k === "footnote" ? "footnote attrs"
+       : k === "duplicate" ? "duplicate"
+       : k === "gibberish" ? "gibberish" : "any";
+}
 function haveBothFiles() {
   const formEl = document.getElementById("uploadForm");
   const a = formEl.querySelector('input[name="original"]')?.files?.[0];
@@ -118,8 +119,27 @@ function haveBothFiles() {
 
 // Run /diff with only=<kind>, then render
 async function runDiff(kind) {
+  if (allCleared) {
+    // Post-apply: treat everything as clean; just clear panes
+    document.getElementById("leftPane").textContent  = "";
+    document.getElementById("rightPane").textContent = "";
+    document.getElementById("pos").textContent = "0/0";
+    currentSteps = null; currentStepsRight = null; currentKind = "text"; currentAttr = null;
+    return;
+  }
   if (!haveBothFiles()) {
-    alert("Please choose both files first.");
+    // No files chosen → try server state via /render to report if nothing remains
+    try {
+      const r = await fetch(`/render?type=${encodeURIComponent(kind || "gibberish")}`);
+      const data = r.ok ? await r.json() : null;
+      if (!data || (data.count || 0) === 0) {
+        alert(`No ${prettyKind(kind)} issues found.`);
+      }
+    } catch {}
+    document.getElementById("leftPane").textContent  = "";
+    document.getElementById("rightPane").textContent = "";
+    document.getElementById("pos").textContent = "0/0";
+    currentSteps = null; currentStepsRight = null; currentKind = "text"; currentAttr = null;
     return;
   }
   const formEl = document.getElementById("uploadForm");
@@ -135,13 +155,8 @@ async function runDiff(kind) {
   const info = await res.json();
   if (info) console.log("DIFF →", info);
 
-  const pretty = (k) =>
-    k === "footnote" ? "footnote attrs" :
-    k === "duplicate" ? "duplicate" :
-    k === "gibberish" ? "gibberish" : "any";
-
   if ((info.count || 0) === 0) {
-    alert(`No ${pretty(kind)} issues found.`);
+    // Quietly clear when this type has nothing remaining
     document.getElementById("leftPane").textContent  = "";
     document.getElementById("rightPane").textContent = "";
     document.getElementById("pos").textContent = "0/0";
@@ -156,6 +171,20 @@ async function runDiff(kind) {
 // ======= UI wiring =======
 document.getElementById("issueType").addEventListener("change", async (e) => {
   const v = e.target.value;
+  if (clearedKinds.has(v)) {
+    document.getElementById("leftPane").textContent  = "";
+    document.getElementById("rightPane").textContent = "";
+    document.getElementById("pos").textContent = "0/0";
+    currentSteps = null; currentStepsRight = null; currentKind = "text"; currentAttr = null;
+    return;
+  }
+  if (allCleared) {
+    document.getElementById("leftPane").textContent  = "";
+    document.getElementById("rightPane").textContent = "";
+    document.getElementById("pos").textContent = "0/0";
+    currentSteps = null; currentStepsRight = null; currentKind = "text"; currentAttr = null;
+    return;
+  }
   if (!v) {
     document.getElementById("leftPane").textContent  = "";
     document.getElementById("rightPane").textContent = "";
@@ -223,6 +252,31 @@ document.getElementById("applyBtn").onclick = async () => {
     console.info("Nothing new to apply; downloading current buffers.");
   }
 
+  // Do not auto-download; just update state. User can click Download.
+
+  // After applying, check current filter vs all
+  try {
+    const s = await fetch("/stats");
+    if (s.ok) {
+      const sj = await s.json();
+      // mark current filter cleared if it now has zero
+      const issueType = document.getElementById("issueType").value || "gibberish";
+      const countForKind = issueType === "all" ? (sj.total || 0) : ((sj.byKind || {})[issueType] || 0);
+      if (countForKind === 0 && issueType !== "all") clearedKinds.add(issueType);
+
+      if ((sj.total || 0) === 0) {
+        alert("No errors found");
+        allCleared = true;
+      }
+    }
+  } catch {}
+};
+
+// Separate Download button
+document.getElementById("downloadBtn").onclick = async () => {
+  const r = await fetch("/download/prepare", { method: "POST" });
+  if (!r.ok) { alert("Download prep failed"); return; }
+  const data = await r.json();
   if (data.download_left)  window.open(data.download_left,  "_blank");
   if (data.download_right) window.open(data.download_right, "_blank");
 };

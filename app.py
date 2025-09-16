@@ -7,6 +7,7 @@ from xml_engine.hardindex import (
 )
 
 import os, traceback
+from datetime import datetime
 from collections import Counter
 
 app = Flask(__name__)
@@ -21,12 +22,42 @@ STATE = {
     "left_attr_spans": None, "right_attr_spans": None,
 }
 
+# ---- MongoDB (optional) ----
+MONGO_URI = os.getenv("MONGO_URI", "").strip()
+mongo_client = None
+mongo_db = None
+try:
+    if MONGO_URI:
+        from pymongo import MongoClient
+        mongo_client = MongoClient(MONGO_URI, connect=True, serverSelectionTimeoutMS=3000)
+        # Trigger server selection early
+        mongo_client.admin.command("ping")
+        mongo_db = mongo_client.get_database() if "/" in MONGO_URI.split("@")[ -1 ] else mongo_client["xml_tree_proof"]
+except Exception:
+    mongo_client = None
+    mongo_db = None
+
 def ser_steps(steps): return [[ln, idx] for (ln, idx) in steps]
 def de_steps(obj): return tuple((ln, int(idx)) for ln, idx in obj)
 
 @app.route("/")
 def home():
     return render_template("index.html")
+
+@app.route("/health")
+def health():
+    ok = True
+    details = {"app": "ok"}
+    if mongo_client is not None:
+        try:
+            mongo_client.admin.command("ping")
+            details["mongo"] = "ok"
+        except Exception as e:
+            ok = False
+            details["mongo"] = f"error: {e}"
+    else:
+        details["mongo"] = "disabled"
+    return jsonify({"ok": ok, "details": details})
 
 @app.route("/diff", methods=["POST"])
 def diff_route():
@@ -58,6 +89,19 @@ def diff_route():
         })
 
         kinds = Counter([i["kind"] for i in issues])
+
+        # Log session to Mongo (best-effort)
+        if mongo_db is not None:
+            try:
+                mongo_db["sessions"].insert_one({
+                    "ts": datetime.utcnow(),
+                    "only": only_kind or "all",
+                    "stats": {"count": len(issues), "byKind": dict(kinds)},
+                    "client": request.remote_addr,
+                })
+            except Exception:
+                pass
+
         return jsonify({"count": len(issues), "byKind": dict(kinds)})
     except Exception as e:
         traceback.print_exc()
@@ -190,12 +234,10 @@ def accept():
         else:
             STATE["raw_left"]  = apply_replacements(STATE["raw_left"],  [(ls, le, src)])
 
-    # ---- reparse the side we just changed so /render shows it immediately ----
+    # ---- reparse both sides so UI reflects synchronized state immediately ----
     try:
-        if direction == "left_to_right":
-            STATE["right_tree"] = parse_tree(STATE["raw_right"])
-        else:
-            STATE["left_tree"]  = parse_tree(STATE["raw_left"])
+        STATE["left_tree"]  = parse_tree(STATE["raw_left"])
+        STATE["right_tree"] = parse_tree(STATE["raw_right"])
     except Exception as e:
         traceback.print_exc()
         return jsonify({"ok": False, "error": f"reparse failed: {e}"}), 500
@@ -225,6 +267,23 @@ def accept():
     if ridx is not None:
         STATE["issues"].pop(ridx)
         STATE["idx"] = min(STATE["idx"], max(0, len(STATE["issues"]) - 1))
+
+    # Log accept action (best-effort)
+    if mongo_db is not None:
+        try:
+            mongo_db["actions"].insert_one({
+                "ts": datetime.utcnow(),
+                "action": "accept",
+                "kind": kind,
+                "direction": direction,
+                "attr": attr,
+                "steps": stepsL,
+                "steps_right": stepsR,
+                "remaining": len(STATE["issues"]),
+                "client": request.remote_addr,
+            })
+        except Exception:
+            pass
 
     return jsonify({"ok": True, "remaining": len(STATE["issues"])})
 
@@ -296,6 +355,7 @@ def apply():
     # ✅ Always write what we currently have to disk (even if 0 newly applied)
     outL = os.path.join("output", "final_left.xml")
     outR = os.path.join("output", "final_right.xml")
+    # Write current buffers as-is so only accepted fixes are included
     with open(outL, "wb") as f: f.write(STATE["raw_left"].encode("utf-8", errors="replace"))
     with open(outR, "wb") as f: f.write(STATE["raw_right"].encode("utf-8", errors="replace"))
 
@@ -305,6 +365,19 @@ def apply():
         "download_left": "/download/left",
         "download_right": "/download/right"
     }
+    # Log apply action (best-effort)
+    if mongo_db is not None:
+        try:
+            mongo_db["actions"].insert_one({
+                "ts": datetime.utcnow(),
+                "action": "apply",
+                "applied_left": applied_left,
+                "applied_right": applied_right,
+                "remaining": len(STATE["issues"]),
+                "client": request.remote_addr,
+            })
+        except Exception:
+            pass
     if applied_left == 0 and applied_right == 0:
         resp["note"] = "already_applied_only"  # 👈 hint for UI
     return jsonify(resp)
@@ -318,6 +391,24 @@ def download_left():
 @app.route("/download/right")
 def download_right():
     return send_file(os.path.join("output", "final_right.xml"), as_attachment=True)
+
+@app.route("/download/prepare", methods=["POST"])
+def prepare_download():
+    """Write current buffers to disk for download without applying new changes.
+    Final files mirror the RIGHT side so user gets the correct statements.
+    """
+    try:
+        outL = os.path.join("output", "final_left.xml")
+        outR = os.path.join("output", "final_right.xml")
+        with open(outL, "wb") as f: f.write((STATE.get("raw_right") or "").encode("utf-8", errors="replace"))
+        with open(outR, "wb") as f: f.write((STATE.get("raw_right") or "").encode("utf-8", errors="replace"))
+        return jsonify({
+            "download_left": "/download/left",
+            "download_right": "/download/right"
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(debug=True)
